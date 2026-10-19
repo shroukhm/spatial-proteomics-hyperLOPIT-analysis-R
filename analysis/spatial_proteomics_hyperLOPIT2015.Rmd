@@ -1,0 +1,563 @@
+---
+title: "Spatial proteomics with hyperLOPIT2015: from marker profiles to TAGM-MAP localisation"
+author: "Shrouk Hany"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+    df_print: paged
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+# Global chunk options: show the code, hide package start-up messages and warnings.
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width  = 9,
+  fig.height = 6
+)
+```
+
+# Aim and background
+
+This notebook walks through a basic spatial proteomics analysis in R,
+using the example `hyperLOPIT2015` dataset (mouse embryonic stem cells)
+from the `pRolocdata` package.
+
+The workflow mirrors the main steps of the *Eimeria tenella* sporozoite
+hyperLOPIT study (Attree et al., 2026), so it can be used as training:
+
+1.  Inspect the data and the marker proteins.
+2.  Check that marker proteins of the same organelle have similar
+    abundance profiles.
+3.  Visualise the data with PCA and t-SNE.
+4.  Train a **TAGM-MAP** classifier on the markers.
+5.  Predict the localisation of the "unknown" proteins.
+6.  Keep only confident predictions (localisation probability \>= 0.99).
+7.  Compare the result with the results stored in the dataset.
+
+The idea in one paragraph: organelles are separated on a density
+gradient, each gradient fraction is measured by TMT mass spectrometry,
+so every protein gets an abundance **profile** across fractions.
+Proteins in the same organelle have similar profiles. Proteins with
+known localisation (**markers**) are used to train a model, which then
+predicts the localisation of all other (**unknown**) proteins.
+
+# Installation (run once)
+
+This chunk is **not evaluated** when knitting (`eval = FALSE`). Run it
+manually in the R console the first time.
+
+```{r install, eval=FALSE}
+# BiocManager is used to install packages from Bioconductor.
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+
+# pRoloc:     tools for protein subcellular localisation analysis.
+# pRolocdata: example datasets, including hyperLOPIT2015.
+# MSnbase:    classes and tools for storing and analysing proteomics data.
+# pRolocGUI:  interactive tools for exploring spatial proteomics data.
+BiocManager::install(c("pRoloc", "pRolocdata", "MSnbase", "pRolocGUI"))
+
+# Rtsne provides the t-SNE dimensionality reduction method.
+install.packages("Rtsne")
+```
+
+# Load packages and data
+
+```{r load-packages}
+# These packages must be loaded in every new R session.
+library(MSnbase)
+library(pRoloc)
+library(pRolocdata)
+
+# Load the hyperLOPIT2015 dataset (an MSnSet object) from pRolocdata.
+data(hyperLOPIT2015)
+
+# Create a shorter name for convenience.
+hl <- hyperLOPIT2015
+
+sum(is.na(exprs(hl)))
+```
+
+## Overview of the object
+
+An `MSnSet` links three tables:
+
+-   `exprs(hl)`: protein abundance in each sample (the profiles).
+-   `fData(hl)`: protein annotations (including the `markers` column).
+-   `pData(hl)`: sample annotations (replicate, TMT reagent, gradient
+    fraction, density).
+
+```{r overview}
+# Summary: number of proteins (features), samples and annotation columns.
+hl
+
+# Dimensions of the quantitative data.
+# Rows = protein features; columns = samples (replicates x TMT channels).
+dims(hl)
+
+# Number of proteins in each marker class.
+# "unknown" = proteins without a marker label (these are what we want to predict).
+table(fData(hl)$markers)
+```
+
+Note the class imbalance: some classes (for example Mitochondrion) have
+many markers, while others (for example Endosome) have very few. Small
+classes are harder to model well.
+
+The `hyperLOPIT2015` dataset is stored as an `MSnSet` object and
+contains quantitative spatial proteomics data. The dataset was
+normalized to the sum of intensities.
+
+### Dataset Dimensions
+
+-   **Number of proteins (features):** 5,032
+-   **Number of quantitative samples:** 20
+-   **Expression data:** `exprs`
+-   **Sample metadata:** `phenoData`
+-   **Protein metadata:** `featureData`
+-   **Publication PMID:** 26754106
+-   **MSnbase version recorded in the dataset:** 2.7.5
+
+#### Sample Metadata
+
+The dataset contains 20 quantitative samples across two replicates.
+Sample metadata include:
+
+-   `Replicate`
+-   `TMT.Reagent`
+-   `Acquisition.Method`
+-   `Gradient.Fraction`
+-   `Iodixonal.Density`
+
+#### Protein Localization Labels
+
+The protein metadata contain localization labels for 5,032 proteins. The
+distribution of the labels is summarized below.
+
+| Subcellular compartment               | Number of proteins |
+|:--------------------------------------|-------------------:|
+| 40S Ribosome                          |                 27 |
+| 60S Ribosome                          |                 43 |
+| Actin cytoskeleton                    |                 13 |
+| Cytosol                               |                 43 |
+| Endoplasmic reticulum/Golgi apparatus |                107 |
+| Endosome                              |                 13 |
+| Extracellular matrix                  |                 13 |
+| Lysosome                              |                 33 |
+| Mitochondrion                         |                383 |
+| Nucleus - Chromatin                   |                 64 |
+| Nucleus - Non-chromatin               |                 85 |
+| Peroxisome                            |                 17 |
+| Plasma membrane                       |                 51 |
+| Proteasome                            |                 34 |
+| Unknown                               |              4,106 |
+| **Total**                             |          **5,032** |
+
+#### Initial Observations
+
+Most proteins (4,106; approximately 81.6%) are labelled `unknown`, while
+926 proteins have an assigned subcellular localization label.
+
+**Reference:** Publication associated with the dataset, PMID:
+[26754106](https://pubmed.ncbi.nlm.nih.gov/26754106/).
+
+## Sample metadata
+
+```{r pdata}
+# Sample metadata: replicate number, TMT reagent, acquisition method,
+# gradient fraction and iodixanol density.
+# The 20 samples are 2 replicates x 10 fractions. Note that the first sample of
+# each replicate is the cytosol (soluble) fraction and one is a chromatin
+# fraction, so the x-axis is not a simple continuous density axis.
+pData(hl)
+```
+
+# Marker classes and their abundance profiles
+
+```{r classes}
+# Names of the known localisation classes (the "unknown" label is excluded).
+cls <- getMarkerClasses(hl, fcol = "markers")
+cls
+```
+
+## Mitochondrial markers
+
+```{r profile-mito, fig.height=5}
+# Rows of the proteins labelled as Mitochondrion.
+i <- which(fData(hl)$markers == "Mitochondrion")
+
+# Make the sample names on the x-axis readable (rotate them, add bottom margin).
+# The old graphical settings are saved in `op` and restored afterwards.
+op <- par(mar = c(8, 4, 3, 1), las = 2, cex.axis = 0.5)
+
+# Each line is one protein; it shows how its abundance changes across the
+# 20 samples. Markers of the same organelle should look alike.
+plotDist(hl[i, ], markers = featureNames(hl)[i])
+
+par(op)
+```
+
+## Lysosomal markers
+
+```{r profile-lyso, fig.height=5}
+# Rows of the proteins labelled as Lysosome.
+j <- which(fData(hl)$markers == "Lysosome")
+
+op <- par(mar = c(8, 4, 3, 1), las = 2, cex.axis = 0.5)
+
+# Compare with the mitochondrial plot: the shape is consistent within the
+# class but the peak is in a different place. This difference between classes
+# is what allows a classifier to tell organelles apart.
+plotDist(hl[j, ], markers = featureNames(hl)[j])
+
+par(op)
+```
+
+## Mean profile per class
+
+Instead of judging the plots by eye, we can compute the mean profile of
+every marker class and find the sample where each class peaks.
+
+```{r mean-profiles}
+# Step 1: select the proteins of one marker class.
+# Step 2: take their abundance values.
+# Step 3: average them for each of the 20 samples.
+# Step 4: combine everything into a matrix (rows = classes, columns = samples).
+mean.prof <- t(sapply(cls, function(k) {
+  colMeans(exprs(hl)[which(fData(hl)$markers == k), ])
+}))
+
+# Sample with the highest mean abundance for each class.
+colnames(mean.prof)[apply(mean.prof, 1, which.max)]
+
+# The same for two classes we looked at above.
+names(which.max(mean.prof["Mitochondrion", ]))
+names(which.max(mean.prof["Lysosome", ]))
+```
+
+# Dimensionality reduction
+
+## PCA
+
+```{r pca}
+# PCA reduces the profiles to a few dimensions that keep as much variation as
+# possible. fcol = NULL means we do not colour by marker class yet.
+# The percentages on the axes show how much variance each component explains.
+plot2D(hl, fcol = NULL, method = "PCA")
+```
+
+## t-SNE (no colours)
+
+```{r tsne-plain}
+# t-SNE is non-linear and tends to separate clusters more clearly than PCA.
+# set.seed() makes the layout reproducible (t-SNE has a random component).
+# Important: distances between clusters in t-SNE should not be over-interpreted;
+# use it for exploration only.
+set.seed(1)
+plot2D(hl, fcol = NULL, method = "t-SNE", cex = 0.5)
+```
+
+## t-SNE coloured by marker class
+
+```{r tsne-markers}
+# Colour proteins by their marker class. Grey points are "unknown" proteins.
+# If markers of the same organelle form tight, separate groups, the experiment
+# separated the organelles well. This is the equivalent of Fig. 1B in the
+# Eimeria paper.
+set.seed(1)
+plot2D(hl, fcol = "markers", method = "t-SNE", cex = 0.6)
+
+# Legend with the marker-class colours.
+addLegend(hl, fcol = "markers", where = "bottomleft", bty = "n", cex = 0.5)
+```
+
+```{r tsne-markers-png}
+# Save a larger version of the plot as a PNG file (the legend does not overlap
+# the data as easily in a bigger figure).
+png("tsne_markers.png", width = 1600, height = 1000, res = 150)
+set.seed(1)
+plot2D(hl, fcol = "markers", method = "t-SNE", cex = 0.6)
+addLegend(hl, fcol = "markers", where = "bottomleft", bty = "n", cex = 0.6)
+invisible(dev.off())
+```
+
+Observations from this plot in our run: mitochondrion, ER/Golgi, the two
+nuclear classes, lysosome and the ribosomes form clear groups, whereas
+plasma membrane, cytosol, endosome and the very small classes are more
+spread out or sparse. A large grey region in the middle contains many
+unknown proteins without markers.
+
+# TAGM-MAP classification
+
+TAGM (T-Augmented Gaussian Mixture) is a Bayesian model. It learns the
+profile distribution of every marker class and also allows each protein
+to be an **outlier** (not belonging to any annotated class). TAGM-MAP is
+the fast optimisation version.
+
+## Train the model
+
+```{r tagm-train}
+# The values below are the defaults of tagmMapTrain() in our pRoloc version and
+# They were not tuned on this dataset.
+params <- tagmMapTrain(
+  hl,
+  fcol    = "markers",  # column with the marker labels
+  method  = "MAP",      # maximum a posteriori estimates
+  numIter = 100,        # iterations of the EM algorithm
+  lambda0 = 0.01,       # prior shrinkage (weak prior)
+  u = 2, v = 10,        # Beta prior for the outlier proportion
+  seed    = 1           # makes the result reproducible
+)
+params
+```
+
+## Predict localisations
+
+```{r tagm-predict}
+# Predict the localisation of all proteins (markers and unknowns).
+# probOutlier = TRUE also returns the probability of being an outlier.
+res <- tagmMapPredict(hl, params, fcol = "markers", probOutlier = TRUE)
+
+# If tagmMapPredict() is not found in a newer version of pRoloc, use:
+# res <- tagmPredict(hl, params, fcol = "markers", probOutlier = TRUE)
+
+# New columns added by the prediction.
+fvarLabels(res)
+
+# First proteins: the predicted class, its probability and the outlier probability.
+head(fData(res)[, c("markers", "tagm.map.allocation",
+                    "tagm.map.probability", "tagm.map.outlier")])
+```
+
+How to read these columns:
+
+-   `tagm.map.allocation`: the class the protein is closest to.
+-   `tagm.map.probability`: probability of that class.
+-   `tagm.map.outlier`: probability that the protein does not belong to
+    any class. A protein with an outlier probability near 1 should not
+    be trusted, even if an allocation is reported.
+
+```{r prob-outlier-check}
+# Sanity check: is probability + outlier close to 1 for all proteins, or only for
+# the first few? In our run the median was 1 but the minimum was about 0.50.
+fd <- fData(res)
+summary(fd$tagm.map.probability + fd$tagm.map.outlier)
+```
+
+## Keep only confident predictions
+
+The Eimeria paper combines the two probabilities into one localisation
+probability and applies a stringent 0.99 threshold:
+
+localisation probability = allocation probability x (1 - outlier
+probability)
+
+```{r threshold}
+fd <- fData(res)
+
+# Localisation probability exactly as in the paper (Methods 2.12).
+fd$loc.prob <- fd$tagm.map.probability * (1 - fd$tagm.map.outlier)
+
+# Only proteins that were "unknown" are new predictions.
+unk <- fd$markers == "unknown"
+
+# Confident new assignments.
+keep <- unk & fd$loc.prob >= 0.99
+
+sum(unk)    # unknown proteins we started with (4106 in our run)
+sum(keep)   # unknown proteins that passed the 0.99 threshold (1983 in our run)
+
+# Number of new assignments per organelle.
+table(fd$tagm.map.allocation[keep])
+```
+
+Mitochondrion receives relatively few new assignments because most
+mitochondrial proteins are already markers. The very small classes
+(extracellular matrix, actin cytoskeleton, peroxisome, proteasome) also
+receive few assignments; with only 13 to 34 markers each, the model is
+expected to be more conservative for them.
+
+#### Prediction Summary
+
+The TAGM-MAP model was used to predict subcellular localizations for
+proteins initially labelled as `unknown`, using a probability threshold
+of 0.99.
+
+-   **Initially unknown proteins:** 4,106
+-   **Proteins passing the 0.99 threshold:** 1,983
+-   **Percentage passing the threshold:** Approximately 48.3%
+
+#### Predicted Subcellular Localization Distribution
+
+The 1,983 proteins that passed the threshold were distributed across the
+following subcellular compartments:
+
+| Predicted subcellular compartment     | Number of proteins |
+|:--------------------------------------|-------------------:|
+| 40S Ribosome                          |                 43 |
+| 60S Ribosome                          |                  4 |
+| Actin cytoskeleton                    |                  6 |
+| Cytosol                               |                332 |
+| Endoplasmic reticulum/Golgi apparatus |                250 |
+| Endosome                              |                 35 |
+| Extracellular matrix                  |                  2 |
+| Lysosome                              |                252 |
+| Mitochondrion                         |                146 |
+| Nucleus - Chromatin                   |                210 |
+| Nucleus - Non-chromatin               |                364 |
+| Peroxisome                            |                  9 |
+| Plasma membrane                       |                321 |
+| Proteasome                            |                  9 |
+
+The largest predicted groups were **Nucleus - Non-chromatin (364
+proteins)**, **Cytosol (332 proteins)**, and **Plasma membrane (321
+proteins)**. These were followed by Lysosome (252 proteins), Endoplasmic
+reticulum/Golgi apparatus (250 proteins), and Nucleus - Chromatin (210
+proteins).
+
+The remaining 2,123 proteins did not pass the selected threshold. Their
+predicted localizations should therefore be treated as lower-confidence
+results under this filtering criterion, rather than as confirmed
+incorrect predictions.
+
+**Note:** Passing a probability threshold of 0.99 indicates confidence
+according to the model's probability measure; it does not independently
+confirm the biological localization of a protein.
+
+# Visualise the final assignments
+
+```{r final-labels}
+fd <- fData(res)
+
+# Final label for each protein:
+#   - a confident prediction (passed the 0.99 threshold), otherwise "unknown";
+#   - proteins that were already markers keep their original label.
+final <- ifelse(keep, fd$tagm.map.allocation, "unknown")
+is.marker <- fd$markers != "unknown"
+final[is.marker] <- fd$markers[is.marker]
+
+fData(res)$final <- final
+```
+
+```{r tsne-final}
+# t-SNE coloured by the final assignment. Compare with the markers-only plot:
+# the new assignments fill the regions around the markers, and a grey region of
+# unassigned proteins remains in the centre.
+set.seed(1)
+plot2D(res, fcol = "final", method = "t-SNE", cex = 0.6)
+addLegend(res, fcol = "final", where = "bottomleft", bty = "n", cex = 0.5)
+```
+
+```{r tsne-final-png}
+# Save a larger version as a PNG file.
+png("tsne_final.png", width = 1800, height = 1100, res = 150)
+set.seed(1)
+plot2D(res, fcol = "final", method = "t-SNE", cex = 0.6)
+addLegend(res, fcol = "final", where = "bottomleft", bty = "n", cex = 0.6)
+invisible(dev.off())
+```
+
+The unassigned proteins (those that did not pass 0.99) may have mixed
+profiles, may be located in more than one compartment, or may belong to
+organelles without markers. The Eimeria paper reports the same kind of
+difficult region (HDBSCAN cluster 8, which mixes nucleus, ribosome and
+cytosol).
+
+# Validation against the stored results
+
+The dataset contains a table (`TAGM`) with the results from the original
+study. We can use it to check that our analysis reproduces them.
+
+```{r stored-table}
+# Look at the stored results (MAP and MCMC versions of TAGM).
+head(fData(hl)$TAGM)
+```
+
+```{r compare}
+# Stored results from the original study vs. our results.
+old  <- fData(hl)$TAGM
+mine <- fData(res)
+colnames(old)
+
+# Proteins that were unknown (the real predictions).
+unk <- fData(hl)$markers == "unknown"
+
+# 1) Do the allocations agree?
+same <- as.character(old[, "tagm.map.allocation"]) ==
+        as.character(mine$tagm.map.allocation)
+mean(same)        # fraction of all proteins that agree (0.994 in our run)
+mean(same[unk])   # fraction of unknown proteins that agree (0.993 in our run)
+
+# 2) How similar are the probabilities?
+old.p <- as.numeric(old[, "tagm.map.probability"])
+cor(old.p, mine$tagm.map.probability, use = "complete.obs")   # 0.998 in our run
+plot(old.p, mine$tagm.map.probability,
+     xlab = "Stored MAP probability", ylab = "My MAP probability")
+```
+
+The comparison between the stored MAP results and the newly generated
+predictions produced the following results:
+
+| Evaluation metric                                                         | Result |
+|:-----------------------------------|-----------------------------------:|
+| Agreement in localization assignments across all proteins                 | 99.44% |
+| Agreement in assignments among initially unknown proteins                 | 99.32% |
+| Pearson correlation between stored and newly calculated MAP probabilities | 0.9982 |
+| Number of proteins with different localization assignments                |     28 |
+
+#### Interpretation
+
+The newly generated TAGM-MAP predictions showed high agreement with the
+stored results. Approximately 99.44% of all proteins received the same
+localization assignment, while agreement among proteins initially
+labelled as `unknown` was approximately 99.32%.
+
+The Pearson correlation coefficient of 0.9982 indicates a very strong
+positive linear relationship between the stored and newly calculated MAP
+probabilities.
+
+Although the localization assignments differed for 28 proteins, all 28
+were initially labelled as `unknown`. These differences may reflect
+variations in model fitting or parameter estimation and do not, by
+themselves, indicate which localization is biologically correct.
+
+```{r disagreements}
+# 3) Proteins where the two analyses disagree (28 in our run).
+d <- which(!same)
+length(d)
+
+data.frame(
+  stored   = old[d, "tagm.map.allocation"],
+  mine     = mine$tagm.map.allocation[d],
+  stored.p = old.p[d],
+  my.p     = mine$tagm.map.probability[d]
+)
+```
+
+In most of the disagreeing proteins both probabilities are extremely
+small, so the reported allocation is just the "least unlikely" class and
+a tiny numerical difference can change it. Always look at the
+probability, not only at the allocation.
+
+```{r disagreements-threshold}
+# Do any of the disagreeing proteins pass the 0.99 threshold in our results?
+# If not (expected: 0), the final confident list is not affected by them.
+loc.prob <- mine$tagm.map.probability * (1 - mine$tagm.map.outlier)
+sum(loc.prob[d] >= 0.99)
+max(loc.prob[d])   # highest localisation probability among the disagreeing proteins
+```
+
+# Session information
+
+```{r session-info}
+# Package versions used to produce this report (useful for reproducibility).
+sessionInfo()
+```
