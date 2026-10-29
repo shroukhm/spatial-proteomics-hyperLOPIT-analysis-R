@@ -19,6 +19,9 @@ The workflow is inspired by spatial proteomics approaches used in published rese
 - Predict localization assignments for proteins initially labelled as unknown.
 - Filter predictions using a localization probability threshold of 0.99.
 - Compare newly generated predictions with the TAGM-MAP results stored in the dataset.
+- Explore protein abundance patterns using HDBSCAN clustering and compare the resulting clusters with known localization markers.
+- Perform Gene Ontology (GO) enrichment analysis to investigate the biological plausibility of predicted protein localizations.
+- Compare newly generated predictions with the TAGM-MAP results stored in the dataset.
 
 ## Dataset
 
@@ -45,6 +48,9 @@ The quantitative data are provided by the package, so a separate download of the
    Retain predictions with a localization probability of at least 0.99.
 7. **Visualization:** Plot marker classes and final confident assignments.
 8. **Validation:** Compare newly generated predictions with the TAGM-MAP results stored in the dataset.
+9. **Unsupervised clustering:** Apply HDBSCAN to the t-SNE embedding without using localization marker labels during clustering. Compare different minPts values and examine the resulting clusters in relation to known localization markers.
+10. **GO enrichment analysis:** Perform enrichment analysis for Cellular Component (CC), Molecular Function (MF), and Biological Process (BP) using confidently predicted localizations. Use all detected proteins as the background and apply Benjamini–Hochberg correction for multiple testing.
+11. **Visualization:** Plot marker classes, final confident assignments, HDBSCAN clusters, and GO enrichment results.
 
 ## Results From the Existing Analysis
 
@@ -61,7 +67,11 @@ The current notebook reports the following results:
 | Pearson correlation between stored and newly calculated MAP probabilities | 0.9982 |
 | Proteins with differing localization assignments | 28 |
 
-These values describe the existing analysis run and should be confirmed by rerunning the notebook in the target R environment.
+The HDBSCAN analysis using minPts = 30 identified six clusters and 580 noise proteins. Mitochondrial markers grouped predominantly in one cluster, while chromatin and non-chromatin nuclear markers formed separate clusters. Several other localization classes grouped together in a large mixed cluster, illustrating the limitations of unsupervised clustering for separating all subcellular compartments.
+
+GO enrichment analysis identified biological terms consistent with several predicted localization groups, including mitochondrial functions, chromatin organization, RNA processing, and ER/Golgi-related functions. These results provide a functional plausibility check for the predictions but do not independently confirm protein localization experimentally.
+
+These values describe the current analysis run and should be confirmed by rerunning the notebook in the target R environment.
 
 A prediction passing the probability threshold is a model-based result, not independent experimental confirmation of a protein's biological localization.
 
@@ -86,6 +96,11 @@ spatial-proteomics-hyperLOPIT/
 - `pRoloc`
 - `pRolocdata`
 - `Rtsne`
+- dbscan
+- clusterProfiler
+- org.Mm.eg.db
+- enrichplot
+- ggplot2
 
 ## Installation
 
@@ -99,10 +114,17 @@ if (!requireNamespace("BiocManager", quietly = TRUE)) {
 BiocManager::install(c(
   "MSnbase",
   "pRoloc",
-  "pRolocdata"
+  "pRolocdata",
+  "clusterProfiler",
+  "org.Mm.eg.db",
+  "enrichplot"
 ))
 
-install.packages("Rtsne")
+install.packages(c(
+  "Rtsne",
+  "dbscan",
+  "ggplot2"
+))
 ```
 
 ## Run the Analysis
@@ -125,6 +147,10 @@ The intended outputs include:
 - A table of confident predicted protein localizations.
 - A summary of predicted localization classes.
 - A comparison of newly generated and stored TAGM-MAP results.
+- HDBSCAN cluster visualizations and comparisons with known localization markers.
+- GO enrichment results for Cellular Component, Molecular Function, and Biological Process.
+- CSV files containing GO enrichment results.
+- PNG dot plots showing enriched GO terms.
 - An HTML report containing the analysis and interpretation.
 
 Only outputs that have actually been generated and checked should be described as available files in the repository.
