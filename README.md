@@ -3,7 +3,7 @@
 A reproducible R-based spatial proteomics workflow using the `hyperLOPIT2015` dataset to explore protein abundance profiles, predict protein subcellular localization with TAGM-MAP, validate the predictions against the results stored in the dataset, and assess their biological plausibility using unsupervised HDBSCAN clustering and Gene Ontology (GO) enrichment.
 
 <!-- Optional banner: add an image to results/figures/ and link it here -->
-<!-- ![Banner](results/figures/banner.png) -->
+ ![Banner](results/figures/cover_page.png) 
 
 ## Research Team
 
