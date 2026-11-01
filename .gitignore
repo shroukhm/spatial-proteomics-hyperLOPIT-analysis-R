@@ -1,0 +1,42 @@
+
+# R session files
+.Rhistory
+.RData
+.Ruserdata
+.Rproj.user/
+
+# RStudio project files
+*.Rproj
+
+# R Markdown / Quarto generated files
+*_cache/
+*_files/
+.quarto/
+_site/
+
+# Knitted output
+*.utf8.md
+*.knit.md
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*~
+
+# Operating system files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Logs
+*.log
+
+# Large or generated analysis files
+*.RData
+*.rds
+*.Rda
+
+# Local environment files
+.Renviron
+.Rprofile
